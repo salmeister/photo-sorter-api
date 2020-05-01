@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29318.209
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PhotoSorterAPI", "PhotoSorterAPI\PhotoSorterAPI.csproj", "{CF410991-D1A3-4C7B-BB4F-B84348188C33}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CF410991-D1A3-4C7B-BB4F-B84348188C33}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CF410991-D1A3-4C7B-BB4F-B84348188C33}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CF410991-D1A3-4C7B-BB4F-B84348188C33}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CF410991-D1A3-4C7B-BB4F-B84348188C33}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {C57AE9E5-97E4-44BF-912F-A1903182BF38}
+	EndGlobalSection
+EndGlobal
