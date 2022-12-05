@@ -38,107 +38,114 @@ namespace PhotoSorterAPI.Services
 
         public void RunImport()
         {
-            if (Directory.Exists(_configs.ImportDir))
-            {
-                if (!Directory.Exists(_configs.PicDestinationDir))
+            foreach (string importDir in _configs.ImportDirs) {
+                if (Directory.Exists(importDir))
                 {
-                    _logger.LogInformation($"Creating directory: {_configs.PicDestinationDir}");
-                    Directory.CreateDirectory(_configs.PicDestinationDir);
-                }
-
-                if (!Directory.Exists(_configs.VideoDestinationDir))
-                {
-                    _logger.LogInformation($"Creating directory: {_configs.VideoDestinationDir}");
-                    Directory.CreateDirectory(_configs.VideoDestinationDir);
-                }
-
-                //Initialize Shutterfly
-                if (_configs.ShutterflyUpload)
-                {
-                    _logger.LogInformation($"Shutterfly flag is on.");
-                    if (_secrets.SFAppID != "" && _secrets.SFSharedSecret != "" && _secrets.SFUsername != "" && _secrets.SFPassword != "")
+                    if (!Directory.Exists(_configs.PicDestinationDir))
                     {
-                        string authenticationID = ShutterflyService.GetAuthenticationID(_secrets.SFUsername, _secrets.SFPassword, _secrets.SFAppID, _secrets.SFSharedSecret);
-                        if (!authenticationID.StartsWith("Failed:"))
+                        _logger.LogInformation($"Creating directory: {_configs.PicDestinationDir}");
+                        Directory.CreateDirectory(_configs.PicDestinationDir);
+                    }
+
+                    if (!Directory.Exists(_configs.VideoDestinationDir))
+                    {
+                        _logger.LogInformation($"Creating directory: {_configs.VideoDestinationDir}");
+                        Directory.CreateDirectory(_configs.VideoDestinationDir);
+                    }
+
+                    //Initialize Shutterfly
+                    if (_configs.ShutterflyUpload)
+                    {
+                        _logger.LogInformation($"Shutterfly flag is on.");
+                        if (_secrets.SFAppID != "" && _secrets.SFSharedSecret != "" && _secrets.SFUsername != "" && _secrets.SFPassword != "")
                         {
-                            _logger.LogInformation($"Secured authentication ID.");
-                            sfAuthID = authenticationID;
+                            string authenticationID = ShutterflyService.GetAuthenticationID(_secrets.SFUsername, _secrets.SFPassword, _secrets.SFAppID, _secrets.SFSharedSecret);
+                            if (!authenticationID.StartsWith("Failed:"))
+                            {
+                                _logger.LogInformation($"Secured authentication ID.");
+                                sfAuthID = authenticationID;
+                            }
                         }
                     }
+
+                    _logger.LogInformation($"Getting pictures in {importDir}");
+                    FileInfo[] Pictures = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
+                                           where !videoExts.Contains(fi.Extension.ToLower())
+                                           select fi)
+                                                .ToArray();
+                    _logger.LogInformation($"{Pictures.Length.ToString()} pictures found.");
+
+                    _logger.LogInformation($"Getting videos in {importDir}");
+                    FileInfo[] Videos = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
+                                         where videoExts.Contains(fi.Extension.ToLower())
+                                         select fi)
+                                                .ToArray();
+                    _logger.LogInformation($"{Videos.Length.ToString()} videos found.");
+
+                    List<string> moveErrors = new List<string>();
+                    List<string> uploadErrors = new List<string>();
+
+                    foreach (FileInfo pictureFile in Pictures)
+                    {
+                        ProcessPicture(pictureFile, ref moveErrors, ref uploadErrors);
+                    }
+
+                    foreach (FileInfo videoFile in Videos)
+                    {
+                        ProcessVideo(videoFile, ref moveErrors);
+                    }
+
+                    CleanUp();
                 }
-
-                _logger.LogInformation($"Getting pictures in {_configs.ImportDir}");
-                FileInfo[] Pictures = (from fi in new DirectoryInfo(_configs.ImportDir).GetFiles("*.*", SearchOption.AllDirectories)
-                                       where !videoExts.Contains(fi.Extension.ToLower())
-                                       select fi)
-                                            .ToArray();
-                _logger.LogInformation($"{Pictures.Length.ToString()} pictures found.");
-
-                _logger.LogInformation($"Getting videos in {_configs.ImportDir}");
-                FileInfo[] Videos = (from fi in new DirectoryInfo(_configs.ImportDir).GetFiles("*.*", SearchOption.AllDirectories)
-                                     where videoExts.Contains(fi.Extension.ToLower())
-                                     select fi)
-                                            .ToArray();
-                _logger.LogInformation($"{Videos.Length.ToString()} videos found.");
-
-                List<string> moveErrors = new List<string>();
-                List<string> uploadErrors = new List<string>();
-
-                foreach (FileInfo pictureFile in Pictures)
+                else
                 {
-                    ProcessPicture(pictureFile, ref moveErrors, ref uploadErrors);
+                    _logger.LogWarning($"Import directory {importDir} does not exist for user {Environment.UserName}. Check your settings.");
                 }
-
-                foreach (FileInfo videoFile in Videos)
-                {
-                    ProcessVideo(videoFile, ref moveErrors);
-                }
-
-                CleanUp();
-            }
-            else
-            {
-                _logger.LogError($"Import directory {_configs.ImportDir} does not exist for user {Environment.UserName}. Check your settings.");
             }
         }
 
         void CleanUp()
         {
             _logger.LogInformation("Starting Cleanup...");
-            DirectoryInfo[] subDirs = (from di in new DirectoryInfo(_configs.ImportDir).GetDirectories("*.*", SearchOption.AllDirectories)
-                                       where (Directory.EnumerateFileSystemEntries(di.FullName).Any())
-                                       select di)
-                                             .ToArray();
-
-            if (subDirs.Length > 0) {
-                _logger.LogInformation($"Cleanup up {subDirs.Length.ToString()} directories...");
-
-                foreach (DirectoryInfo dir in subDirs)
-                {
-                    try
-                    {
-                        if (File.Exists($"{dir.FullName}{dirDel}Thumbs.db"))
-                        {
-                            _logger.LogDebug("Deleting Thumbs.db");
-                            File.Delete($"{dir.FullName}{dirDel}Thumbs.db");
-                        }
-                        if (File.Exists($"{dir.FullName}{dirDel}desktop.ini"))
-                        {
-                            _logger.LogDebug("Deleting desktop.ini");
-                            File.Delete($"{dir.FullName}{dirDel}desktop.ini");
-                        }
-                        _logger.LogDebug($"Deleting {dir.FullName}");
-                        Directory.Delete(dir.FullName);
-                    }
-                    catch (Exception ex) {
-                        _logger.LogInformation(ex.Message);
-                    }
-                }
-                _logger.LogInformation("Finished cleaning up.");
-            }
-            else
+            foreach (string importDir in _configs.ImportDirs)
             {
-                _logger.LogInformation("Nothing to cleanup.");
+                DirectoryInfo[] subDirs = (from di in new DirectoryInfo(importDir).GetDirectories("*.*", SearchOption.AllDirectories)
+                                           where (Directory.EnumerateFileSystemEntries(di.FullName).Any())
+                                           select di)
+                                                 .ToArray();
+
+                if (subDirs.Length > 0)
+                {
+                    _logger.LogInformation($"Cleanup up {subDirs.Length.ToString()} directories...");
+
+                    foreach (DirectoryInfo dir in subDirs)
+                    {
+                        try
+                        {
+                            if (File.Exists($"{dir.FullName}{dirDel}Thumbs.db"))
+                            {
+                                _logger.LogDebug("Deleting Thumbs.db");
+                                File.Delete($"{dir.FullName}{dirDel}Thumbs.db");
+                            }
+                            if (File.Exists($"{dir.FullName}{dirDel}desktop.ini"))
+                            {
+                                _logger.LogDebug("Deleting desktop.ini");
+                                File.Delete($"{dir.FullName}{dirDel}desktop.ini");
+                            }
+                            _logger.LogDebug($"Deleting {dir.FullName}");
+                            Directory.Delete(dir.FullName);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogInformation(ex.Message);
+                        }
+                    }
+                    _logger.LogInformation("Finished cleaning up.");
+                }
+                else
+                {
+                    _logger.LogInformation("Nothing to cleanup.");
+                }
             }
         }
 
@@ -192,7 +199,7 @@ namespace PhotoSorterAPI.Services
                 if (result == "Error")
                 {
                     moveErrors.Add(pictureFile.Name);
-                    MoveToManualFolder(pictureFile.FullName, _configs.ImportDir, newFileName.ToString(), ext);
+                    MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
                 }
                 else
                 {
@@ -210,7 +217,7 @@ namespace PhotoSorterAPI.Services
             else
             {
                 moveErrors.Add(pictureFile.Name);
-                MoveToManualFolder(pictureFile.FullName, _configs.ImportDir, newFileName.ToString(), ext);
+                MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
             }
 
             result = $"Successfully moved file {pictureFile.Name} to {moveToPath} as {newFileName.ToString()}{ext}";
@@ -224,13 +231,13 @@ namespace PhotoSorterAPI.Services
             DateTime? pictureDate = null;
 
             //Get Date Taken
-            ExifProfile profile = image.GetExifProfile();
+            IExifProfile profile = image.GetExifProfile();
             if (!(profile is null))
             {
                 IExifValue dateTakeExif = profile.GetValue(ExifTag.DateTimeDigitized);
-                if (!(dateTakeExif is null))
+                if (dateTakeExif is not null)
                 {
-                    pictureDate = DateTime.ParseExact(dateTakeExif.Value.ToString().TrimEnd('\0'), "yyyy:MM:dd HH:mm:ss", null);
+                    pictureDate = DateTime.ParseExact(dateTakeExif.GetValue().ToString().TrimEnd('\0'), "yyyy:MM:dd HH:mm:ss", null);
                     _logger.LogDebug($"The picture taken date is {pictureDate}");
                 }
                 else
@@ -258,7 +265,7 @@ namespace PhotoSorterAPI.Services
 
         private void AutoRotate(MagickImage image)
         {
-            ExifProfile profile = image.GetExifProfile();
+            IExifProfile profile = image.GetExifProfile();
             if (!(profile is null))
             {
                 string orientation = profile.GetValue(ExifTag.Orientation)?.ToString() ?? "";
@@ -351,20 +358,20 @@ namespace PhotoSorterAPI.Services
                     if (result == "Error")
                     {
                         moveErrors.Add(videoFile.Name);
-                        MoveToManualFolder(videoFile.FullName, _configs.ImportDir, newFileName.ToString(), ext);
+                        MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, newFileName.ToString(), ext);
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex.Message);
                     moveErrors.Add(videoFile.Name);
-                    MoveToManualFolder(videoFile.FullName, _configs.ImportDir, newFileName.ToString(), ext);
+                    MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, newFileName.ToString(), ext);
                 }
             }
             else
             {
                 moveErrors.Add(videoFile.Name);
-                MoveToManualFolder(videoFile.FullName, _configs.ImportDir, newFileName.ToString(), ext);
+                MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, newFileName.ToString(), ext);
             }
         }
 
@@ -451,8 +458,8 @@ namespace PhotoSorterAPI.Services
         private string GetCameraModel(MagickImage image)
         {
             string cameraModel = "", model, make;
-            ExifProfile profile = image.GetExifProfile();
-            if (!(profile is null))
+            IExifProfile profile = image.GetExifProfile();
+            if (profile is not null)
             {
                 model = profile.GetValue(ExifTag.Model)?.ToString() ?? "";
                 _logger.LogDebug($"Camera model is {model}");
