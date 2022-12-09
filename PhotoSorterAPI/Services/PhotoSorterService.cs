@@ -151,7 +151,7 @@ namespace PhotoSorterAPI.Services
 
         private void ProcessPicture(FileInfo pictureFile, ref List<string> moveErrors, ref List<string> uploadErrors)
         {
-            if (pictureFile.Name == "Thumbs.db" || pictureFile.Extension == ".ini")
+            if (pictureFile.Name == "Thumbs.db" || pictureFile.Name == "Readme.md" || pictureFile.Extension == ".ini")
             {
                 return;   //skip
             }
