@@ -329,22 +329,7 @@ namespace PhotoSorterAPI.Services
             _logger.LogDebug($"Processing video {videoFile.Name}...");
             DateTime myDateTaken = videoFile.CreationTime;
             string ext = videoFile.Extension.ToLower();
-            StringBuilder newFileName = new StringBuilder();
-            newFileName.Append(_configs.FileNamePrefix);
-            newFileName.Append(myDateTaken.ToString("yyyyMMdd_HHmmss"));
-            newFileName.Append(_configs.FileNameSuffix);
-
-            if (_configs.FileNameUseCameraModel)
-            {
-                var image = new MagickImage(videoFile.FullName);
-                string cameraModel = GetCameraModel(image).Replace(" ", "_");
-                if (cameraModel != "")
-                {
-                    newFileName.Append("_");
-                    newFileName.Append(cameraModel);
-                }
-            }
-            _logger.LogDebug($"New video name is {newFileName}");
+            string basename = Path.GetFileNameWithoutExtension(videoFile.FullName);
 
             string moveToPath = CreateVidDirStructure(ref myDateTaken);
 
@@ -354,24 +339,24 @@ namespace PhotoSorterAPI.Services
             {
                 try
                 {
-                    string result = MoveVideo(videoFile.FullName, moveToPath, newFileName.ToString(), ext);
+                    string result = MoveVideo(videoFile.FullName, moveToPath, basename, ext);
                     if (result == "Error")
                     {
                         moveErrors.Add(videoFile.Name);
-                        MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, newFileName.ToString(), ext);
+                        MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, basename, ext);
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex.Message);
                     moveErrors.Add(videoFile.Name);
-                    MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, newFileName.ToString(), ext);
+                    MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, basename, ext);
                 }
             }
             else
             {
                 moveErrors.Add(videoFile.Name);
-                MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, newFileName.ToString(), ext);
+                MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, basename, ext);
             }
         }
 
@@ -428,7 +413,7 @@ namespace PhotoSorterAPI.Services
 
         private string MoveVideo(string fromFilePath, string toPath, string fileName, string ext)
         {
-            string path = Path.Combine(toPath, "fileName}{ext}");
+            string path = Path.Combine(toPath, $"{fileName}{ext}");
             if (!File.Exists(path))
             {
                 _logger.LogDebug($"Attempting to move {fromFilePath} to {path}");
