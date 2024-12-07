@@ -20,6 +20,7 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.*" />
 	<PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.*" />
 	<PackageReference Include="Swashbuckle.AspNetCore" Version="7.*" />
+	  <PackageReference Include="Swashbuckle.AspNetCore.Annotations" Version="7.*" />
   </ItemGroup>
 
 </Project>

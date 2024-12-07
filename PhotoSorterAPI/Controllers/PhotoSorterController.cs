@@ -12,9 +12,9 @@ namespace PhotoSorterAPI.Controllers
         private readonly ILogger<PhotoSorterController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
         /// <summary>
-        /// Run Photo Sorter
+        /// Run Photo Sorter to import and sort photos
         /// </summary>
-        /// <returns>A result value</returns>
+        /// <returns></returns>
         [HttpGet]
         public string Get()
         {
