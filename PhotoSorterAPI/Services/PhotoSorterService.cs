@@ -62,8 +62,8 @@ namespace PhotoSorterAPI.Services
                                                 .ToArray();
                     _logger.LogInformation($"{Videos.Length.ToString()} videos found.");
 
-                    List<string> moveErrors = new List<string>();
-                    List<string> uploadErrors = new List<string>();
+                    List<string> moveErrors = [];
+                    List<string> uploadErrors = [];
 
                     foreach (FileInfo pictureFile in Pictures)
                     {
