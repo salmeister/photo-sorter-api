@@ -4,11 +4,9 @@ using Microsoft.Extensions.Options;
 using PhotoSorterAPI.Models;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace PhotoSorterAPI.Services
 {
@@ -21,17 +19,14 @@ namespace PhotoSorterAPI.Services
     {
         private readonly ILogger<PhotoSorterService> _logger;
 
-        private readonly ShutterflyAuth _secrets;
         private readonly AppConfigs _configs;
         private static List<string> videoExts { get; set; }
         private readonly char dirDel = Path.DirectorySeparatorChar;
-        private string sfAuthID = "";
 
 
-        public PhotoSorterService(ILogger<PhotoSorterService> logger, IOptions<AppConfigs> configs, IOptions<ShutterflyAuth> secrets)
+        public PhotoSorterService(ILogger<PhotoSorterService> logger, IOptions<AppConfigs> configs)
         {
             _logger = logger;
-            _secrets = secrets.Value;
             _configs = configs.Value;
             videoExts = _configs.KnownVideoExtensions.Split(',').ToList();
         }
@@ -51,21 +46,6 @@ namespace PhotoSorterAPI.Services
                     {
                         _logger.LogInformation($"Creating directory: {_configs.VideoDestinationDir}");
                         Directory.CreateDirectory(_configs.VideoDestinationDir);
-                    }
-
-                    //Initialize Shutterfly
-                    if (_configs.ShutterflyUpload)
-                    {
-                        _logger.LogInformation($"Shutterfly flag is on.");
-                        if (_secrets.SFAppID != "" && _secrets.SFSharedSecret != "" && _secrets.SFUsername != "" && _secrets.SFPassword != "")
-                        {
-                            string authenticationID = ShutterflyService.GetAuthenticationID(_secrets.SFUsername, _secrets.SFPassword, _secrets.SFAppID, _secrets.SFSharedSecret);
-                            if (!authenticationID.StartsWith("Failed:"))
-                            {
-                                _logger.LogInformation($"Secured authentication ID.");
-                                sfAuthID = authenticationID;
-                            }
-                        }
                     }
 
                     _logger.LogInformation($"Getting pictures in {importDir}");
@@ -200,18 +180,6 @@ namespace PhotoSorterAPI.Services
                 {
                     moveErrors.Add(pictureFile.Name);
                     MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
-                }
-                else
-                {
-                    if (_configs.ShutterflyUpload)
-                    {
-                        string uploadResult = UploadPicture(pictureDate, moveToPath, newFileName.ToString(), ext);
-                        if (uploadResult.StartsWith("Failed"))
-                        {
-                            _logger.LogError($"The following error occurred while uploading {pictureFile.Name} to shutterfly: {uploadResult}");
-                            uploadErrors.Add(pictureFile.Name);
-                        }
-                    }
                 }
             }
             else
@@ -544,14 +512,6 @@ namespace PhotoSorterAPI.Services
             }
 
             return "Success";
-        }
-
-        private string UploadPicture(DateTime dateTaken, string newPath, string fileName, string ext)
-        {
-            _logger.LogDebug("Attempt to upload to Shutterfly.");
-            DateTimeFormatInfo mfi = new DateTimeFormatInfo();
-            string monthName = mfi.GetMonthName(dateTaken.Month).ToString();
-            return ShutterflyService.Upload(sfAuthID, _secrets.SFAppID, monthName, dateTaken.Year.ToString(), newPath, fileName + ext);
         }
     }
 }
