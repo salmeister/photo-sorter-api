@@ -14,7 +14,7 @@ env:
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
   IMAGE_NAME: photosorterapi
-
+  PROJECT_NAME: PhotoSorterAPI
 
 jobs:
   build:
@@ -70,10 +70,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./PhotoSorterAPI/Dockerfile
+          file: ./${{ env.PROJECT_NAME }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
-          tags: 'latest,${{ steps.meta.outputs.tags }}'
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY }}/${{ github.actor }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
 
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker
