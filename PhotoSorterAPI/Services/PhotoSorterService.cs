@@ -65,8 +65,19 @@ namespace PhotoSorterAPI.Services
                     List<string> moveErrors = [];
                     List<string> uploadErrors = [];
 
+                    foreach(string excludeDir in _configs.ExcludeImportSubDirNames)
+                    {
+                        _logger.LogInformation($"Excluding {excludeDir} from import.");
+                    }
+
                     foreach (FileInfo pictureFile in Pictures)
                     {
+                        _logger.LogDebug($"Processing picture {pictureFile.Name} in directory {pictureFile.DirectoryName} ...");
+                        if (_configs.ExcludeImportSubDirNames.Any(sd => pictureFile.DirectoryName.ToUpper().Contains(sd.ToUpper())))
+                        {
+                            _logger.LogDebug($"Skipping {pictureFile.Name} because it is in an excluded directory.");
+                            continue;
+                        }
                         ProcessPicture(pictureFile, ref moveErrors, ref uploadErrors);
                     }
 
