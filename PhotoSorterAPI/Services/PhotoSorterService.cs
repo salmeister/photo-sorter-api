@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace PhotoSorterAPI.Services
 {
@@ -50,7 +51,8 @@ namespace PhotoSorterAPI.Services
 
                     _logger.LogInformation($"Getting pictures in {importDir}");
                     FileInfo[] Pictures = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
-                                           where !videoExts.Contains(fi.Extension.ToLower())
+                                           where !videoExts.Contains(fi.Extension.ToLower()) &&
+                                                 !_configs.ExcludeImportSubDirs.Any(sd => fi.DirectoryName.Contains(sd))
                                            select fi)
                                                 .ToArray();
                     _logger.LogInformation($"{Pictures.Length.ToString()} pictures found.");
@@ -137,59 +139,71 @@ namespace PhotoSorterAPI.Services
             }
             _logger.LogDebug($"Processing picture {pictureFile.Name}...");
 
-            var image = new MagickImage(pictureFile.FullName);
-            
-            DateTime pictureDate = GetPictureDate(image);
-
-            StringBuilder newFileName = new StringBuilder();
-            newFileName.Append(_configs.FileNamePrefix);
-            newFileName.Append(pictureDate.ToString("yyyyMMdd_HHmmss"));
-            string ext = pictureFile.Extension.ToLower();
-            string moveToPath = CreatePicDirStructure(pictureDate);
-
-            AutoRotate(image);
-
-            if (_configs.FileNameUseCameraModel)
+            try
             {
-                string cameraModel = GetCameraModel(image).Replace(" ","_");
-                if (cameraModel != "")
-                {
-                    newFileName.Append("_");
-                    newFileName.Append(cameraModel);
-                }
-            }
+                var image = new MagickImage(pictureFile.FullName);
 
-            newFileName.Append(_configs.FileNameSuffix);
-            _logger.LogDebug($"New picture name is {newFileName}");
+                DateTime pictureDate = GetPictureDate(image);
 
-            string result;
-            //Attempt to move
-            if (moveToPath != "Error")
-            {
-                try
+                StringBuilder newFileName = new StringBuilder();
+                newFileName.Append(_configs.FileNamePrefix);
+                newFileName.Append(pictureDate.ToString("yyyyMMdd_HHmmss"));
+                string ext = pictureFile.Extension.ToLower();
+                string moveToPath = CreatePicDirStructure(pictureDate);
+
+                AutoRotate(image);
+
+                if (_configs.FileNameUseCameraModel)
                 {
-                    result = MovePicture(pictureFile.FullName, moveToPath, newFileName.ToString(), ext);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex.Message);
-                    result = "Error";
+                    string cameraModel = GetCameraModel(image).Replace(" ", "_");
+                    if (cameraModel != "")
+                    {
+                        newFileName.Append("_");
+                        newFileName.Append(cameraModel);
+                    }
                 }
 
-                if (result == "Error")
+                newFileName.Append(_configs.FileNameSuffix);
+                _logger.LogDebug($"New picture name is {newFileName}");
+
+                string result;
+                //Attempt to move
+                if (moveToPath != "Error")
+                {
+                    try
+                    {
+                        result = MovePicture(pictureFile.FullName, moveToPath, newFileName.ToString(), ext);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex.Message);
+                        result = "Error";
+                    }
+
+                    if (result == "Error")
+                    {
+                        moveErrors.Add(pictureFile.Name);
+                        MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
+                    }
+                }
+                else
                 {
                     moveErrors.Add(pictureFile.Name);
                     MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
                 }
-            }
-            else
-            {
-                moveErrors.Add(pictureFile.Name);
-                MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
-            }
 
-            result = $"Successfully moved file {pictureFile.Name} to {moveToPath} as {newFileName.ToString()}{ext}";
-            _logger.LogInformation(result);
+                result = $"Successfully moved file {pictureFile.Name} to {moveToPath} as {newFileName.ToString()}{ext}";
+                _logger.LogInformation(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex.Message);
+                if (!moveErrors.Contains(pictureFile.Name))
+                {
+                    moveErrors.Add(pictureFile.Name);
+                }
+                MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, pictureFile.FullName, pictureFile.Extension);
+            }
         }
 
         private DateTime GetPictureDate(MagickImage image)

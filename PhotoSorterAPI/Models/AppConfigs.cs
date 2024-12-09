@@ -4,6 +4,7 @@ namespace PhotoSorterAPI.Models
     public class AppConfigs
     {
         public string[] ImportDirs { get; set; }
+        public string[] ExcludeImportSubDirs { get; set; }
         public string PicDestinationDir { get; set; }
         public string VideoDestinationDir { get; set; }
         public string FileNamePrefix { get; set; }
