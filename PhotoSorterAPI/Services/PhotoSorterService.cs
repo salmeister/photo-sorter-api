@@ -51,7 +51,7 @@ namespace PhotoSorterAPI.Services
 
                     _logger.LogInformation($"Getting pictures in {importDir}");
                     FileInfo[] Pictures = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
-                                           where !videoExts.Contains(fi.Extension.ToLower()) && !_configs.ExcludeImportSubDirNames.Any(sd => fi.DirectoryName.Contains(sd, StringComparison.CurrentCultureIgnoreCase))
+                                           where !videoExts.Contains(fi.Extension.ToLower()) && !_configs.ExcludeImportSubDirNames.Any(sd => fi.DirectoryName.Split(Path.DirectorySeparatorChar).Contains(sd, StringComparer.CurrentCultureIgnoreCase))
                                            select fi).ToArray();
                     _logger.LogInformation($"{Pictures.Length.ToString()} pictures found.");
 
