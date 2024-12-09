@@ -49,6 +49,12 @@ namespace PhotoSorterAPI.Services
                         Directory.CreateDirectory(_configs.VideoDestinationDir);
                     }
 
+                    _logger.LogInformation($"Found {_configs.ExcludeImportSubDirNames.Length} subdirectories to exclude from the import directory.");
+                    foreach (string excludeDir in _configs.ExcludeImportSubDirNames)
+                    {
+                        _logger.LogInformation($"Excluding {excludeDir} from import.");
+                    }
+
                     _logger.LogInformation($"Getting pictures in {importDir}");
                     FileInfo[] Pictures = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
                                            where !videoExts.Contains(fi.Extension.ToLower()) && !_configs.ExcludeImportSubDirNames.Any(sd => fi.DirectoryName.Split(Path.DirectorySeparatorChar).Contains(sd, StringComparer.CurrentCultureIgnoreCase))
@@ -65,10 +71,7 @@ namespace PhotoSorterAPI.Services
                     List<string> moveErrors = [];
                     List<string> uploadErrors = [];
 
-                    foreach(string excludeDir in _configs.ExcludeImportSubDirNames)
-                    {
-                        _logger.LogInformation($"Excluding {excludeDir} from import.");
-                    }
+                    
 
                     foreach (FileInfo pictureFile in Pictures)
                     {
