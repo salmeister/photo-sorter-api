@@ -28,3 +28,9 @@ Example configuration in `AppConfigs`:
     "logLevel": "INFO"
 }
 ```
+
+## Implementation
+Calling the API can be configured through a cron job on a linux system
+``` 0 6 * * * /home/usr/scripts/photosorter_job.sh >/dev/null 2>&1 ```
+    - Content of script:
+      ``` curl -X GET "http://ipaddress:port/PhotoSorter" -H "accept: text/plain" ```
