@@ -1,13 +1,27 @@
+using ImageMagick;
+using ImageMagick.Configuration;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
 using PhotoSorterAPI.Models;
 using PhotoSorterAPI.Services;
 using System;
 using System.IO;
 using System.Reflection;
 using System.Text.Json.Serialization;
-using Swashbuckle.AspNetCore.Annotations;
+
+// Lock down ImageMagick before any image is read: files in the import folders are untrusted input.
+var magickConfig = ConfigurationFiles.Default;
+magickConfig.Policy.Data = """
+<policymap>
+  <policy domain="delegate" rights="none" pattern="*" />
+  <policy domain="path" rights="none" pattern="@*" />
+  <policy domain="coder" rights="none" pattern="{EPHEMERAL,URL,HTTP,HTTPS,FTP,MVG,MSL,TEXT,TXT,LABEL,CAPTION,PANGO,PS,PS2,PS3,EPS,EPI,EPSI,EPSF,PDF,PDFA,XPS,PCL,SVG,MSVG,RSVG,SHOW,WIN,X,SCREENSHOT,INLINE}" />
+  <policy domain="resource" name="width" value="64KP" />
+  <policy domain="resource" name="height" value="64KP" />
+</policymap>
+""";
+MagickNET.Initialize(magickConfig);
 
 var builder = WebApplication.CreateBuilder(args);
 
