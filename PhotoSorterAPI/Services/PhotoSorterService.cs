@@ -1,13 +1,13 @@
-﻿using ImageMagick;
+using ImageMagick;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PhotoSorterAPI.Models;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using static System.Net.Mime.MediaTypeNames;
 
 namespace PhotoSorterAPI.Services
 {
@@ -18,523 +18,388 @@ namespace PhotoSorterAPI.Services
 
     public class PhotoSorterService : IPhotoSorterService
     {
+        private const string ManualMoveDirName = "ManualMove";
+        private const string DefaultVideoExtensions = ".mp4,.m4v,.avi,.mov,.mpg,.wmv,.webm";
+        private const string ExifDateFormat = "yyyy:MM:dd HH:mm:ss";
+        private const int MaxCameraModelLength = 64;
+        private const int MaxDuplicateSuffix = 10;
+
+        private static readonly HashSet<string> SkippedFileNames = new(StringComparer.OrdinalIgnoreCase) { "Thumbs.db", "Readme.md", ".DS_Store" };
+        private static readonly HashSet<string> JunkFileNames = new(StringComparer.OrdinalIgnoreCase) { "Thumbs.db", "desktop.ini", ".DS_Store" };
+
+        // Only formats that can be losslessly-enough re-encoded in place. HEIC/AVIF orientation is applied by the container (irot) so they are never rewritten.
+        private static readonly HashSet<MagickFormat> RotatableFormats = [MagickFormat.Jpeg, MagickFormat.Jpg, MagickFormat.Png, MagickFormat.Tiff, MagickFormat.Tif, MagickFormat.WebP];
+
+        private static readonly char[] UnsafeFileNameChars = [.. Path.GetInvalidFileNameChars().Union(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])];
+
         private readonly ILogger<PhotoSorterService> _logger;
-
         private readonly AppConfigs _configs;
-        private static List<string> videoExts { get; set; }
-        private readonly char dirDel = Path.DirectorySeparatorChar;
-
+        private readonly HashSet<string> _videoExts;
+        private readonly string[] _excludedSubDirNames;
 
         public PhotoSorterService(ILogger<PhotoSorterService> logger, IOptions<AppConfigs> configs)
         {
             _logger = logger;
             _configs = configs.Value;
-            videoExts = _configs.KnownVideoExtensions.Split(',').ToList();
+
+            string videoExtensions = string.IsNullOrWhiteSpace(_configs.KnownVideoExtensions) ? DefaultVideoExtensions : _configs.KnownVideoExtensions;
+            _videoExts = videoExtensions
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(e => e.StartsWith('.') ? e : $".{e}")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            // ManualMove is always excluded so failed files are not re-processed on every run.
+            _excludedSubDirNames = (_configs.ExcludeImportSubDirNames ?? [])
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Select(n => n.Trim())
+                .Append(ManualMoveDirName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
         }
 
         public void RunImport()
         {
-            foreach (string importDir in _configs.ImportDirs) {
-                if (Directory.Exists(importDir))
+            foreach (string importDir in _configs.ImportDirs ?? [])
+            {
+                if (!Directory.Exists(importDir))
                 {
-                    if (!Directory.Exists(_configs.PicDestinationDir))
-                    {
-                        _logger.LogInformation($"Creating directory: {_configs.PicDestinationDir}");
-                        Directory.CreateDirectory(_configs.PicDestinationDir);
-                    }
-
-                    if (!Directory.Exists(_configs.VideoDestinationDir))
-                    {
-                        _logger.LogInformation($"Creating directory: {_configs.VideoDestinationDir}");
-                        Directory.CreateDirectory(_configs.VideoDestinationDir);
-                    }
-
-                    if (_configs.ExcludeImportSubDirNames?.Length > 0)
-                        _logger.LogInformation($"Found {_configs.ExcludeImportSubDirNames.Length} subdirectories to exclude from the import directory.");
-                    
-                    _logger.LogInformation($"Getting pictures in {importDir}");
-                    FileInfo[] Pictures = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
-                                           where !videoExts.Contains(fi.Extension.ToLower()) && !_configs.ExcludeImportSubDirNames.Any(sd => fi.DirectoryName.Contains(sd, StringComparison.CurrentCultureIgnoreCase))
-                                           select fi).ToArray();
-                    _logger.LogInformation($"{Pictures.Length.ToString()} pictures found.");
-
-                    _logger.LogInformation($"Getting videos in {importDir}");
-                    FileInfo[] Videos = (from fi in new DirectoryInfo(importDir).GetFiles("*.*", SearchOption.AllDirectories)
-                                         where videoExts.Contains(fi.Extension.ToLower())
-                                         select fi)
-                                                .ToArray();
-                    _logger.LogInformation($"{Videos.Length.ToString()} videos found.");
-
-                    List<string> moveErrors = [];
-                    List<string> uploadErrors = [];
-
-                    
-
-                    foreach (FileInfo pictureFile in Pictures)
-                    {
-                        _logger.LogDebug($"Processing picture {pictureFile.Name} in directory {pictureFile.DirectoryName} ...");
-                        if (_configs.ExcludeImportSubDirNames.Any(sd => pictureFile.DirectoryName.ToUpper().Contains(sd.ToUpper())))
-                        {
-                            _logger.LogDebug($"Skipping {pictureFile.Name} because it is in an excluded directory.");
-                            continue;
-                        }
-                        ProcessPicture(pictureFile, ref moveErrors, ref uploadErrors);
-                    }
-
-                    foreach (FileInfo videoFile in Videos)
-                    {
-                        ProcessVideo(videoFile, ref moveErrors);
-                    }
-
-                    CleanUp();
+                    _logger.LogWarning("Import directory {ImportDir} does not exist for user {User}. Check your settings.", importDir, Environment.UserName);
+                    continue;
                 }
-                else
+
+                EnsureDirectory(_configs.PicDestinationDir);
+                EnsureDirectory(_configs.VideoDestinationDir);
+
+                _logger.LogInformation("Excluding import subdirectories matching: {Excluded}", string.Join(", ", _excludedSubDirNames));
+                _logger.LogInformation("Getting pictures and videos in {ImportDir}", importDir);
+
+                FileInfo[] files = new DirectoryInfo(importDir)
+                    .GetFiles("*", SearchOption.AllDirectories)
+                    .Where(fi => !IsExcluded(importDir, fi.DirectoryName))
+                    .ToArray();
+
+                FileInfo[] videos = files.Where(fi => _videoExts.Contains(fi.Extension)).ToArray();
+                FileInfo[] pictures = files.Except(videos).ToArray();
+                _logger.LogInformation("{PictureCount} pictures found.", pictures.Length);
+                _logger.LogInformation("{VideoCount} videos found.", videos.Length);
+
+                foreach (FileInfo pictureFile in pictures)
                 {
-                    _logger.LogWarning($"Import directory {importDir} does not exist for user {Environment.UserName}. Check your settings.");
+                    ProcessPicture(pictureFile);
                 }
+
+                foreach (FileInfo videoFile in videos)
+                {
+                    ProcessVideo(videoFile);
+                }
+
+                CleanUp(importDir);
             }
         }
 
-        void CleanUp()
+        private bool IsExcluded(string importDir, string directory)
         {
-            _logger.LogInformation("Starting Cleanup...");
-            foreach (string importDir in _configs.ImportDirs)
-            {
-                DirectoryInfo[] subDirs = (from di in new DirectoryInfo(importDir).GetDirectories("*.*", SearchOption.AllDirectories)
-                                           where (Directory.EnumerateFileSystemEntries(di.FullName).Any())
-                                           select di)
-                                                 .ToArray();
+            // Compare relative to the import root so the root path itself never triggers an exclusion.
+            string relative = Path.GetRelativePath(importDir, directory);
+            if (relative == ".")
+                return false;
 
-                if (subDirs.Length > 0)
-                {
-                    _logger.LogInformation($"Cleanup up {subDirs.Length.ToString()} directories...");
-
-                    foreach (DirectoryInfo dir in subDirs)
-                    {
-                        try
-                        {
-                            if (File.Exists($"{dir.FullName}{dirDel}Thumbs.db"))
-                            {
-                                _logger.LogDebug("Deleting Thumbs.db");
-                                File.Delete($"{dir.FullName}{dirDel}Thumbs.db");
-                            }
-                            if (File.Exists($"{dir.FullName}{dirDel}desktop.ini"))
-                            {
-                                _logger.LogDebug("Deleting desktop.ini");
-                                File.Delete($"{dir.FullName}{dirDel}desktop.ini");
-                            }
-                            _logger.LogDebug($"Deleting {dir.FullName}");
-                            Directory.Delete(dir.FullName);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogInformation(ex.Message);
-                        }
-                    }
-                    _logger.LogInformation("Finished cleaning up.");
-                }
-                else
-                {
-                    _logger.LogInformation("Nothing to cleanup.");
-                }
-            }
+            return _excludedSubDirNames.Any(name => relative.Contains(name, StringComparison.OrdinalIgnoreCase));
         }
 
-        private void ProcessPicture(FileInfo pictureFile, ref List<string> moveErrors, ref List<string> uploadErrors)
+        private void CleanUp(string importDir)
         {
-            if (pictureFile.Name == "Thumbs.db" || pictureFile.Name == "Readme.md" || pictureFile.Extension == ".ini")
+            _logger.LogInformation("Starting cleanup of {ImportDir}...", importDir);
+
+            // Deepest directories first so parents become empty once their children are removed.
+            DirectoryInfo[] subDirs = new DirectoryInfo(importDir)
+                .GetDirectories("*", SearchOption.AllDirectories)
+                .Where(di => !IsExcluded(importDir, di.FullName))
+                .OrderByDescending(di => di.FullName.Length)
+                .ToArray();
+
+            int removed = 0;
+            foreach (DirectoryInfo dir in subDirs)
             {
-                return;   //skip
+                try
+                {
+                    string[] entries = Directory.GetFileSystemEntries(dir.FullName);
+                    if (!entries.All(e => File.Exists(e) && JunkFileNames.Contains(Path.GetFileName(e))))
+                        continue;
+
+                    foreach (string junk in entries)
+                    {
+                        _logger.LogDebug("Deleting {File}", junk);
+                        File.Delete(junk);
+                    }
+
+                    _logger.LogDebug("Deleting {Directory}", dir.FullName);
+                    Directory.Delete(dir.FullName);
+                    removed++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not clean up {Directory}", dir.FullName);
+                }
             }
-            _logger.LogDebug($"Processing picture {pictureFile.Name}...");
+
+            _logger.LogInformation(removed > 0 ? "Removed {Count} empty directories." : "Nothing to cleanup.", removed);
+        }
+
+        private void ProcessPicture(FileInfo pictureFile)
+        {
+            if (SkippedFileNames.Contains(pictureFile.Name) || pictureFile.Extension.Equals(".ini", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _logger.LogDebug("Processing picture {File}...", pictureFile.FullName);
+            string ext = pictureFile.Extension.ToLowerInvariant();
+            string newFileName = Path.GetFileNameWithoutExtension(pictureFile.Name);
 
             try
             {
-                var image = new MagickImage(pictureFile.FullName);
+                DateTime pictureDate;
+                using (var image = new MagickImage(pictureFile.FullName))
+                {
+                    pictureDate = GetPictureDate(image, pictureFile);
 
-                DateTime pictureDate = GetPictureDate(image);
+                    var nameBuilder = new StringBuilder();
+                    nameBuilder.Append(_configs.FileNamePrefix);
+                    nameBuilder.Append(pictureDate.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture));
+                    if (_configs.FileNameUseCameraModel)
+                    {
+                        string cameraModel = SanitizeFileNamePart(GetCameraModel(image));
+                        if (cameraModel != "")
+                        {
+                            nameBuilder.Append('_');
+                            nameBuilder.Append(cameraModel);
+                        }
+                    }
+                    nameBuilder.Append(_configs.FileNameSuffix);
+                    newFileName = nameBuilder.ToString();
+                    _logger.LogDebug("New picture name is {FileName}", newFileName);
 
-                StringBuilder newFileName = new StringBuilder();
-                newFileName.Append(_configs.FileNamePrefix);
-                newFileName.Append(pictureDate.ToString("yyyyMMdd_HHmmss"));
-                string ext = pictureFile.Extension.ToLower();
+                    AutoRotate(image, pictureFile.FullName);
+                }
+
                 string moveToPath = CreatePicDirStructure(pictureDate);
-
-                AutoRotate(image);
-
-                if (_configs.FileNameUseCameraModel)
+                if (moveToPath is not null && MoveToUniquePath(pictureFile.FullName, moveToPath, newFileName, ext))
                 {
-                    string cameraModel = GetCameraModel(image).Replace(" ", "_");
-                    if (cameraModel != "")
-                    {
-                        newFileName.Append("_");
-                        newFileName.Append(cameraModel);
-                    }
+                    _logger.LogInformation("Successfully moved file {File} to {Destination} as {FileName}{Ext}", pictureFile.Name, moveToPath, newFileName, ext);
+                    return;
                 }
-
-                newFileName.Append(_configs.FileNameSuffix);
-                _logger.LogDebug($"New picture name is {newFileName}");
-
-                string result;
-                //Attempt to move
-                if (moveToPath != "Error")
-                {
-                    try
-                    {
-                        result = MovePicture(pictureFile.FullName, moveToPath, newFileName.ToString(), ext);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex.Message);
-                        result = "Error";
-                    }
-
-                    if (result == "Error")
-                    {
-                        moveErrors.Add(pictureFile.Name);
-                        MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
-                    }
-                }
-                else
-                {
-                    moveErrors.Add(pictureFile.Name);
-                    MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, newFileName.ToString(), ext);
-                }
-
-                result = $"Successfully moved file {pictureFile.Name} to {moveToPath} as {newFileName.ToString()}{ext}";
-                _logger.LogInformation(result);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex.Message);
-                if (!moveErrors.Contains(pictureFile.Name))
-                {
-                    moveErrors.Add(pictureFile.Name);
-                }
-                MoveToManualFolder(pictureFile.FullName, pictureFile.Directory.FullName, pictureFile.FullName, pictureFile.Extension);
+                _logger.LogError(ex, "Failed to process picture {File}", pictureFile.FullName);
             }
+
+            MoveToManualFolder(pictureFile, newFileName, ext);
         }
 
-        private DateTime GetPictureDate(MagickImage image)
+        private DateTime GetPictureDate(MagickImage image, FileInfo file)
         {
-            _logger.LogDebug("Attempting to get picture taken date.");
-            //Set Date
-            DateTime? pictureDate = null;
-
-            //Get Date Taken
             IExifProfile profile = image.GetExifProfile();
-            if (!(profile is null))
+            if (profile is not null)
             {
-                IExifValue dateTakeExif = profile.GetValue(ExifTag.DateTimeDigitized);
-                if (dateTakeExif is not null)
+                foreach (ExifTag<string> tag in new[] { ExifTag.DateTimeOriginal, ExifTag.DateTimeDigitized, ExifTag.DateTime })
                 {
-                    pictureDate = DateTime.ParseExact(dateTakeExif.GetValue().ToString().TrimEnd('\0'), "yyyy:MM:dd HH:mm:ss", null);
-                    _logger.LogDebug($"The picture taken date is {pictureDate}");
+                    string value = profile.GetValue(tag)?.Value?.TrimEnd('\0').Trim();
+                    if (DateTime.TryParseExact(value, ExifDateFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime date))
+                    {
+                        _logger.LogDebug("The picture taken date is {Date} (from {Tag})", date, tag);
+                        return date;
+                    }
                 }
-                else
-                {
-                    _logger.LogDebug("The picture taken value is null");
-                }
+                _logger.LogDebug("No usable EXIF date found.");
             }
             else
             {
                 _logger.LogDebug("Could not get image exif profile.");
             }
-            //Get File Creation Date
-            if (pictureDate is null)
-            {
-                pictureDate = File.GetCreationTime(image.FileName);
-            }
-            //Default to Today
-            if (pictureDate is null)
-            {
-                pictureDate = DateTime.Now;
-            }
 
-            return pictureDate.Value;
+            return GetFileDate(file);
         }
 
-        private void AutoRotate(MagickImage image)
+        private static DateTime GetFileDate(FileInfo file)
         {
+            // Copies often get a new creation time but keep the original modified time, so use whichever is older.
+            return file.CreationTime < file.LastWriteTime ? file.CreationTime : file.LastWriteTime;
+        }
+
+        private void AutoRotate(MagickImage image, string filePath)
+        {
+            ushort? orientation = image.GetExifProfile()?.GetValue(ExifTag.Orientation)?.Value;
+            if (orientation is null or <= 1 or > 8)
+            {
+                _logger.LogDebug("No rotating needed");
+                return;
+            }
+
+            if (!RotatableFormats.Contains(image.Format))
+            {
+                _logger.LogDebug("Skipping rotation for {Format}; the file is left unmodified.", image.Format);
+                return;
+            }
+
+            using (var frames = new MagickImageCollection())
+            {
+                frames.Ping(filePath);
+                if (frames.Count > 1)
+                {
+                    _logger.LogDebug("Skipping rotation for multi-frame image {File}", filePath);
+                    return;
+                }
+            }
+
+            _logger.LogDebug("Orientation is {Orientation}; auto-orienting image.", orientation);
+            image.Orientation = (Orientation)orientation.Value;
+            image.AutoOrient();
+
             IExifProfile profile = image.GetExifProfile();
-            if (!(profile is null))
+            if (profile is not null)
             {
-                string orientation = profile.GetValue(ExifTag.Orientation)?.ToString() ?? "";
-                if (!String.IsNullOrWhiteSpace(orientation))
-                {
-                    _logger.LogDebug($"Orientation is {orientation}");
-                    switch (orientation)
-                    {
-                        case "2":
-                            _logger.LogDebug($"Flopping image");
-                            image.Flop(); //x-axis
-                            break;
-                        case "3":
-                            _logger.LogDebug($"Rotating image 180 degrees");
-                            image.Rotate(180);
-                            break;
-                        case "4":
-                            _logger.LogDebug($"Rotating image 180 degrees and flopping");
-                            image.Rotate(180);
-                            image.Flop(); //x-axis
-                            break;
-                        case "5":
-                            _logger.LogDebug($"Rotating image 90 degrees and flopping");
-                            image.Rotate(90);
-                            image.Flop(); //x-axis
-                            break;
-                        case "6":
-                            _logger.LogDebug($"Rotating image 90 degrees");
-                            image.Rotate(90);
-                            break;
-                        case "7":
-                            _logger.LogDebug($"Rotating image 270 degrees and flopping");
-                            image.Rotate(270);
-                            image.Flop(); //x-axis
-                            break;
-                        case "8":
-                            _logger.LogDebug($"Rotating image 270 degrees");
-                            image.Rotate(270);
-                            break;
-                        case "1":
-                        case "1H":
-                        default:
-                            _logger.LogDebug($"No rotating needed");
-                            break;
-                    }
-                    ushort defaultOrient = 1;
-                    _logger.LogDebug($"Resetting the default orientation of the image.");
-                    profile.SetValue(ExifTag.Orientation, defaultOrient);
-                    _logger.LogDebug($"Saving the image modifications.");
-                    image.Write(image.FileName);
-                }
+                profile.SetValue(ExifTag.Orientation, (ushort)1);
+                image.SetProfile(profile);
             }
-            else
+
+            // Write to a temp file first so a failed encode never corrupts the original.
+            string tempPath = $"{filePath}.{Guid.NewGuid():N}.tmp";
+            try
             {
-                _logger.LogInformation("Could not get exif profile.");
+                image.Write(tempPath, image.Format);
+                File.Move(tempPath, filePath, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not rotate {File}; leaving it unmodified.", filePath);
+                File.Delete(tempPath);
             }
         }
 
-        private void ProcessVideo(FileInfo videoFile, ref List<string> moveErrors)
+        private void ProcessVideo(FileInfo videoFile)
         {
-            _logger.LogDebug($"Processing video {videoFile.Name}...");
-            DateTime myDateTaken = videoFile.CreationTime;
-            string ext = videoFile.Extension.ToLower();
-            string basename = Path.GetFileNameWithoutExtension(videoFile.FullName);
+            _logger.LogDebug("Processing video {File}...", videoFile.FullName);
+            string ext = videoFile.Extension.ToLowerInvariant();
+            string basename = Path.GetFileNameWithoutExtension(videoFile.Name);
 
-            string moveToPath = CreateVidDirStructure(ref myDateTaken);
-
-
-            //Attempt to move
-            if (moveToPath != "Error")
+            try
             {
-                try
+                string moveToPath = CreateVidDirStructure(GetFileDate(videoFile));
+                if (moveToPath is not null && MoveToUniquePath(videoFile.FullName, moveToPath, basename, ext))
                 {
-                    string result = MoveVideo(videoFile.FullName, moveToPath, basename, ext);
-                    if (result == "Error")
-                    {
-                        moveErrors.Add(videoFile.Name);
-                        MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, basename, ext);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex.Message);
-                    moveErrors.Add(videoFile.Name);
-                    MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, basename, ext);
+                    _logger.LogInformation("Successfully moved file {File} to {Destination}", videoFile.Name, moveToPath);
+                    return;
                 }
             }
-            else
+            catch (Exception ex)
             {
-                moveErrors.Add(videoFile.Name);
-                MoveToManualFolder(videoFile.FullName, videoFile.Directory.FullName, basename, ext);
+                _logger.LogError(ex, "Failed to process video {File}", videoFile.FullName);
             }
+
+            MoveToManualFolder(videoFile, basename, ext);
         }
 
         private string CreatePicDirStructure(DateTime dt)
         {
-            string year = dt.Year.ToString();
-            string monthNum = dt.Month.ToString().PadLeft(2, '0');
-            string monAbbrv = dt.ToString("MMM");
+            string monthDir = $"{dt.Month:00}_{dt.ToString("MMM", CultureInfo.CurrentCulture)}";
+            string monthPath = Path.Combine(_configs.PicDestinationDir, dt.Year.ToString(CultureInfo.InvariantCulture), monthDir);
+            return EnsureDirectory(monthPath) ? monthPath : null;
+        }
 
+        private string CreateVidDirStructure(DateTime dt)
+        {
+            string vidPath = Path.Combine(_configs.VideoDestinationDir, dt.Year.ToString(CultureInfo.InvariantCulture));
+            return EnsureDirectory(vidPath) ? vidPath : null;
+        }
+
+        private bool EnsureDirectory(string path)
+        {
             try
             {
-                string yearPath = $"{_configs.PicDestinationDir}{dirDel}{year}";
-                string monthPath = $"{yearPath}{dirDel}{monthNum}_{monAbbrv}";
-                if (!Directory.Exists(yearPath))
+                if (!Directory.Exists(path))
                 {
-                    _logger.LogInformation($"Creating directory {yearPath}");
-                    Directory.CreateDirectory(yearPath);
+                    _logger.LogInformation("Creating directory {Directory}", path);
+                    Directory.CreateDirectory(path);
                 }
-                if (!Directory.Exists(monthPath))
-                {
-                    _logger.LogInformation($"Creating directory {monthPath}");
-                    Directory.CreateDirectory(monthPath);
-                }
+                return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex.Message);
-                return "Error";
+                _logger.LogError(ex, "Could not create directory {Directory}", path);
+                return false;
             }
-
-            return $"{_configs.PicDestinationDir}{dirDel}{year}{dirDel}{monthNum}_{monAbbrv}";
         }
 
-        private string CreateVidDirStructure(ref DateTime dt)
+        private bool MoveToUniquePath(string fromFilePath, string toPath, string fileName, string ext)
         {
-            string year = dt.Year.ToString();
-            string vidPath = $"{_configs.VideoDestinationDir}{dirDel}{year}";
-            try
+            for (int i = 0; i < MaxDuplicateSuffix; i++)
             {
-                if (!Directory.Exists(vidPath))
-                {
-                    _logger.LogInformation($"Creating directory {vidPath}");
-                    Directory.CreateDirectory(vidPath);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex.Message);
-                return "Error";
+                string candidate = Path.Combine(toPath, i == 0 ? $"{fileName}{ext}" : $"{fileName}_{i}{ext}");
+                if (File.Exists(candidate))
+                    continue;
+
+                _logger.LogDebug("Attempting to move {From} to {To}", fromFilePath, candidate);
+                File.Move(fromFilePath, candidate, overwrite: false);
+                return true;
             }
 
-            return vidPath;
-        }
-
-        private string MoveVideo(string fromFilePath, string toPath, string fileName, string ext)
-        {
-            string path = Path.Combine(toPath, $"{fileName}{ext}");
-            if (!File.Exists(path))
-            {
-                _logger.LogDebug($"Attempting to move {fromFilePath} to {path}");
-                File.Move(fromFilePath, path);
-            }
-            else
-            {
-                int i;
-                for (i = 1; i < 10; i++)
-                {
-                    if (!File.Exists(Path.Combine(toPath, $"{fileName}_{i}{ext}")))
-                    {
-                        _logger.LogDebug($"Attempting to move from {fromFilePath} to {Path.Combine(toPath, $"{fileName}_{i}{ext}")}");
-                        File.Move(fromFilePath, Path.Combine(toPath, $"{fileName}_{i}{ext}"));
-                        break;
-                    }
-                }
-                if (i >= 10)
-                {
-                    _logger.LogError($"Could not find a unique name for {fileName}{ext}");
-                    return "Error";
-                }
-            }
-            return "Success";
+            _logger.LogError("Could not find a unique name for {FileName}{Ext} in {Directory}", fileName, ext, toPath);
+            return false;
         }
 
         private string GetCameraModel(MagickImage image)
         {
-            string cameraModel = "", model, make;
             IExifProfile profile = image.GetExifProfile();
-            if (profile is not null)
-            {
-                model = profile.GetValue(ExifTag.Model)?.ToString() ?? "";
-                _logger.LogDebug($"Camera model is {model}");
-                make = profile.GetValue(ExifTag.Make)?.ToString() ?? "";
-                _logger.LogDebug($"Camera make is {make}");
-
-                if (!String.IsNullOrWhiteSpace(model))
-                {
-                    cameraModel = model.TrimEnd('\0').Trim();
-                    _logger.LogInformation($"Setting the camera model to {cameraModel}");
-                }
-                else
-                {
-                    if (!String.IsNullOrWhiteSpace(make))
-                    {
-                        cameraModel = make.TrimEnd('\0').Trim();
-                        _logger.LogInformation($"Setting the camera model to {cameraModel}");
-                    }
-                    else
-                    {
-                        _logger.LogInformation("Could not determine the camera make or model.");
-                    }
-                } 
-            }
-            else
+            if (profile is null)
             {
                 _logger.LogDebug("Could not get the exif profile for the image.");
+                return "";
             }
+
+            string model = profile.GetValue(ExifTag.Model)?.Value?.TrimEnd('\0').Trim();
+            string make = profile.GetValue(ExifTag.Make)?.Value?.TrimEnd('\0').Trim();
+            _logger.LogDebug("Camera make is {Make}, model is {Model}", make, model);
+
+            string cameraModel = !string.IsNullOrWhiteSpace(model) ? model : make ?? "";
+            if (cameraModel == "")
+                _logger.LogInformation("Could not determine the camera make or model.");
+
             return cameraModel;
         }
 
-        private void MoveToManualFolder(string fromFilePath, string moveToPath, string fileName, string ext)
+        // EXIF values are untrusted input; strip anything that could alter the destination path.
+        private static string SanitizeFileNamePart(string value)
         {
-            
-            moveToPath = Path.Combine(moveToPath, "ManualMove");
-            _logger.LogInformation($"Moving {fromFilePath} to the {moveToPath}.");
-
-            if (!Directory.Exists(moveToPath))
+            var sb = new StringBuilder(value.Length);
+            foreach (char c in value)
             {
-                _logger.LogInformation($"Creating {moveToPath}");
-                Directory.CreateDirectory(moveToPath);
+                sb.Append(c == ' ' || char.IsControl(c) || UnsafeFileNameChars.Contains(c) ? '_' : c);
             }
 
-            string baseFileName = Path.Combine(moveToPath, fileName);
-
-            if (!File.Exists($"{baseFileName}{ext}"))
-            {
-                _logger.LogDebug($"Attempting to move from {fromFilePath} to {baseFileName}{ext}");
-                File.Move(fromFilePath, $"{baseFileName}{ext}");
-            }
-            else
-            {
-                int i;
-                for (i = 1; i < 10; i++)
-                {
-                    if (!File.Exists($"{baseFileName}_{i}{ext}"))
-                    {
-                        _logger.LogDebug($"Attempting to move from {fromFilePath} to {baseFileName}_{i}{ext}");
-                        File.Move(fromFilePath, $"{baseFileName}_{i}{ext}");
-                        break;
-                    }
-                }
-                if (i >= 10)
-                {
-                    _logger.LogDebug($"Attempting to move from {fromFilePath} to {baseFileName}_{DateTime.Now.ToString("MMddyyyyThhmmssffftt")}{ext}");
-                    File.Move(fromFilePath, $"{baseFileName}_{DateTime.Now.ToString("MMddyyyyThhmmssffftt")}{ext}");
-                }
-            }
+            string result = sb.ToString().Trim('.', '_');
+            return result.Length > MaxCameraModelLength ? result[..MaxCameraModelLength] : result;
         }
 
-        private string MovePicture(string fromFilePath, string toPath, string fileName, string ext)
+        private void MoveToManualFolder(FileInfo file, string fileName, string ext)
         {
-            string defaultPath = Path.Combine(toPath, fileName + ext);
-            if (!File.Exists(defaultPath))
+            try
             {
-                _logger.LogDebug($"Attempting to move from {fromFilePath} to {defaultPath}");
-                File.Move(fromFilePath, defaultPath);
-            }
-            else
-            {
-                _logger.LogDebug($"{defaultPath} already exists so adding a numeric suffix.");
-                int i;
-                for (i = 1; i < 10; i++)
-                {
-                    if (!File.Exists(Path.Combine(toPath,$"{fileName}_{i}{ext}")))
-                    {
-                        _logger.LogDebug($"Attempting to move from {fromFilePath} to {Path.Combine(toPath, $"{fileName}_{i}{ext}")}");
-                        File.Move(fromFilePath, Path.Combine(toPath, $"{fileName}_{i}{ext}"));
-                        break;
-                    }
-                }
-                if (i >= 10)
-                {
-                    _logger.LogError($"Could not find a unique name for {fileName}{ext}");
-                    return "Error";
-                }
-            }
+                string moveToPath = Path.Combine(file.DirectoryName, ManualMoveDirName);
+                _logger.LogInformation("Moving {File} to {Destination}.", file.FullName, moveToPath);
+                if (!EnsureDirectory(moveToPath))
+                    return;
 
-            return "Success";
+                if (!MoveToUniquePath(file.FullName, moveToPath, fileName, ext))
+                {
+                    string timestamped = Path.Combine(moveToPath, $"{fileName}_{DateTime.Now.ToString("MMddyyyyThhmmssffftt", CultureInfo.InvariantCulture)}{ext}");
+                    _logger.LogDebug("Attempting to move {From} to {To}", file.FullName, timestamped);
+                    File.Move(file.FullName, timestamped, overwrite: false);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not move {File} to the manual folder.", file.FullName);
+            }
         }
     }
 }
